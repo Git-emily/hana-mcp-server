@@ -1,0 +1,44 @@
+{
+  "xsappname": "hana-mcp-bdc",
+  "tenant-mode": "dedicated",
+  "scopes": [
+    {
+      "name": "$XSAPPNAME.access",
+      "description": "Permission to call HANA MCP tools"
+    }
+  ],
+  "role-templates": [
+    {
+      "name": "HanaMcpAccess",
+      "description": "Grants access to all HANA MCP tools",
+      "scope-references": [
+        "$XSAPPNAME.access"
+      ]
+    }
+  ],
+  "role-collections": [
+    {
+      "name": "HanaMcpAccessCollection",
+      "description": "Users who may call the HANA MCP server",
+      "role-template-references": [
+        "$XSAPPNAME.HanaMcpAccess"
+      ]
+    }
+  ],
+  "oauth2-configuration": {
+    "grant-types": [
+      "authorization_code",
+      "client_credentials",
+      "password",
+      "urn:ietf:params:oauth:grant-type:jwt-bearer"
+    ],
+    "autoapprove": true,
+    "redirect-uris": [
+      "https://hana-mcp-bdc-ran.cfapps.eu12.hana.ondemand.com/**",
+      "https://*.joule.only.sap/**",
+      "https://*.joule.cloud.sap/**",
+      "http://localhost:18766/mcp-callback",
+      "http://localhost:*/mcp-callback"
+    ]
+  }
+}

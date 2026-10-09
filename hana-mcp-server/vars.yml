@@ -1,0 +1,4 @@
+hana_host: "ba6536e6-1ebc-4d6d-9480-ccbf05f27b99.hana.prod-eu12.hanacloud.ondemand.com"
+hana_user: "C0065DA4815B43B4AD36F3477A3ED385_909TG7XXG1JSMRF2PQJZGQBMR_RT"
+hana_password: "a?iq!tWeJW)6]9R({D%B_S;[SP6{Sk,`lu=l={5CFl5|rC3G7}K^M-%MRA&`_.*hl3~5,VJCWs`6BA!%h1fc@=N:n70!M~T}<sV[`RG0<SLy]^T]N!`g@rwUJq1*#%!)"
+hana_schema: "C0065DA4815B43B4AD36F3477A3ED385"

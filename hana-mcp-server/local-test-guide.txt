@@ -1,0 +1,147 @@
+Local Test Guide — XSUAA Auth (HANA MCP Server)
+================================================
+
+PREREQUISITES
+-------------
+- CF CLI installed and logged in
+- Python + pip installed
+- Postman Desktop Agent (or use curl.exe in PowerShell)
+
+
+STEP 1 — Create XSUAA Service on CF (one-time)
+-----------------------------------------------
+Login to CF:
+  cf login -a https://api.cf.eu12.hana.ondemand.com --sso
+  (open the printed URL in browser, copy passcode, paste in terminal)
+
+Target the correct org and space:
+  cf target -o adoption-tools -s DEV
+
+Create the service instance:
+  cf create-service xsuaa application hana-mcp-xsuaa -c "C:\Users\I517309\OneDrive - SAP SE\Analytics\Joule_Assessment\hana-mcp-server\hana-mcp-server\xs-security.json"
+
+Verify:
+  cf service hana-mcp-xsuaa
+
+
+STEP 2 — Get Service Key Credentials (one-time)
+------------------------------------------------
+  cf create-service-key hana-mcp-xsuaa local-dev-key
+  cf service-key hana-mcp-xsuaa local-dev-key
+
+From the JSON output, copy these values into your .env file:
+  XSUAA_URL          = value of "url"         (NOT "apiurl")
+  XSUAA_CLIENT_ID    = value of "clientid"
+  XSUAA_CLIENT_SECRET = value of "clientsecret"
+  XSUAA_APP_NAME     = value of "xsappname"
+
+
+STEP 3 — Assign Role to Your User (one-time per user)
+------------------------------------------------------
+BTP Cockpit:
+  Subaccount -> Security -> Role Collections -> HanaMcpAccessCollection
+  -> Edit -> Users -> Add -> enter your BTP email -> Save
+
+
+STEP 4 — Configure .env
+------------------------
+Open .env in the project folder and fill in the real values:
+
+  HANA_HOST=your-hana-host.hanacloud.ondemand.com   (can leave as placeholder if not testing HANA tools)
+  HANA_PORT=443
+  HANA_USER=SYSTEM
+  HANA_PASSWORD=your_password_here
+  HANA_SCHEMA=BDC_ASSESSMENT
+
+  XSUAA_URL=https://adoption-tools-xxxxx.authentication.eu12.hana.ondemand.com
+  XSUAA_CLIENT_ID=sb-hana-mcp-bdc!t1234567
+  XSUAA_CLIENT_SECRET=xxxxxxxxxxxxxxxxxxxx
+  XSUAA_APP_NAME=hana-mcp-bdc!t1234567
+
+NOTE: HANA vars are required to start the server but only used when calling tools.
+      For auth testing only, placeholder HANA values are fine.
+
+
+STEP 5 — Start the Server Locally
+----------------------------------
+IMPORTANT: Run from the project folder (not System32 or any other folder).
+
+  cd "C:\Users\I517309\OneDrive - SAP SE\Analytics\Joule_Assessment\hana-mcp-server\hana-mcp-server"
+  python hana_mcp_server.py
+
+Expected startup output:
+  [HANA MCP] Mode local — http://localhost:8000/sse
+  [HANA MCP] XSUAA auth : ACTIVÉ  url=https://adoption-tools-xxxxx.authentication...
+  [HANA MCP] XSUAA app  : hana-mcp-bdc!t1234567
+
+
+STEP 6 — Get a Token in Postman
+--------------------------------
+Method : POST
+URL    : <XSUAA_URL>/oauth/token
+Auth   : Basic Auth
+  Username = XSUAA_CLIENT_ID
+  Password = XSUAA_CLIENT_SECRET
+Body   : x-www-form-urlencoded
+  grant_type = password
+  username   = your-btp-email@sap.com
+  password   = your-btp-password
+
+Copy the "access_token" value from the response.
+NOTE: Each token is valid for ~12 hours. Always get a fresh token after role changes.
+
+
+STEP 7 — Call the MCP Server
+-----------------------------
+Method : POST
+URL    : http://localhost:8000/mcp
+Headers:
+  Authorization : Bearer <access_token>
+  Content-Type  : application/json
+  Accept        : application/json, text/event-stream
+Body (raw JSON):
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "protocolVersion": "2024-11-05",
+      "capabilities": {},
+      "clientInfo": { "name": "test", "version": "1.0" }
+    }
+  }
+
+Or use curl.exe in PowerShell:
+  curl.exe -s -X POST http://localhost:8000/mcp ^
+    -H "Authorization: Bearer <access_token>" ^
+    -H "Content-Type: application/json" ^
+    -H "Accept: application/json, text/event-stream" ^
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1.0\"}}}"
+
+
+EXPECTED RESULTS
+----------------
+Scenario                              | Expected Response
+--------------------------------------|------------------------------------------
+Valid token + role assigned           | 200 OK (MCP initialize success)
+Valid token + role NOT assigned       | 403 Forbidden
+No token / wrong token                | 401 Unauthorized
+XSUAA env vars missing or placeholder | 500 Auth configuration error
+
+
+TROUBLESHOOTING
+---------------
+Problem: "getaddrinfo failed" in server logs
+  Cause : .env has placeholder values, or server started from wrong directory
+  Fix   : cd to project folder first, then run python hana_mcp_server.py
+
+Problem: 401 even with correct token
+  Cause : Token might be old (role removed after token was issued)
+  Fix   : Get a fresh token from XSUAA
+
+Problem: Still 200 after removing role
+  Cause : Using old cached token (Postman variable not refreshed)
+  Fix   : Re-run the token request to get a new token, then test again
+
+Problem: curl in PowerShell gives parameter errors
+  Fix   : Use curl.exe (not curl) in PowerShell

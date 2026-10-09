@@ -1,0 +1,9 @@
+.env
+vars.yml
+__pycache__/
+*.pyc
+*.pyo
+.git/
+xsuaa-migration-plan.txt
+local-test-guide.txt
+btp-deployment-guide.txt

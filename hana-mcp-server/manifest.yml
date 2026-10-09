@@ -1,0 +1,27 @@
+---
+applications:
+  - name: hana-mcp-bdc-Ran
+    memory: 256M
+    disk_quota: 512M
+    instances: 1
+    buildpacks:
+      - python_buildpack
+    command: python hana_mcp_server.py
+    health-check-type: process
+
+    # Variables non-sensibles — OK dans le manifest
+    env:
+      HANA_PORT: "443"
+      HANA_HOST: ((hana_host))
+      HANA_USER: ((hana_user))
+      HANA_PASSWORD: ((hana_password))
+      HANA_SCHEMA: ((hana_schema))
+
+    # Bind the XSUAA service — injects credentials into VCAP_SERVICES automatically
+    services:
+      - hana-mcp-xsuaa
+
+    # ⚠ NE PAS mettre les secrets ici.
+    # Utiliser `cf set-env` pour :
+    #   HANA_HOST, HANA_USER, HANA_PASSWORD, HANA_SCHEMA
+    # XSUAA credentials are injected automatically via the service binding above.
