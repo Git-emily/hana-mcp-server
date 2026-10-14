@@ -295,7 +295,7 @@ class OAuth2Middleware:
             "token_endpoint":                       f"{base}/oauth2/token",
             "registration_endpoint":                f"{base}/oauth2/register",
             "response_types_supported":             ["code"],
-            "grant_types_supported":                ["authorization_code"],
+            "grant_types_supported":                ["authorization_code", "refresh_token"],
             "code_challenge_methods_supported":     ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
             "scopes_supported":                     ["openid"],
@@ -314,16 +314,32 @@ class OAuth2Middleware:
 
     async def _handle_register(self, scope, receive, send) -> None:
         """RFC 7591 dynamic client registration — Joule calls this on first use."""
-        await _read_body(receive)
-        client_id = "joule-" + secrets.token_urlsafe(16)
-        self._clients[client_id] = {"created_at": int(time.time())}
-        await _send_json(send, 201, {
+        body = await _read_body(receive)
+        try:
+            req = json.loads(body) if body else {}
+        except Exception:
+            req = {}
+
+        client_id     = "joule-" + secrets.token_urlsafe(16)
+        redirect_uris = req.get("redirect_uris", [])
+        grant_types   = req.get("grant_types", ["authorization_code", "refresh_token"])
+
+        self._clients[client_id] = {
+            "created_at":    int(time.time()),
+            "redirect_uris": redirect_uris,
+        }
+
+        resp = {
             "client_id":                  client_id,
             "client_id_issued_at":        int(time.time()),
             "token_endpoint_auth_method": "none",
-            "grant_types":                ["authorization_code"],
+            "grant_types":                grant_types,
             "response_types":             ["code"],
-        })
+        }
+        if redirect_uris:
+            resp["redirect_uris"] = redirect_uris  # RFC 7591 §3.2.1 — must echo back
+
+        await _send_json(send, 201, resp)
 
     # ── /oauth2/authorize ──────────────────────────────────────────────────────
 
