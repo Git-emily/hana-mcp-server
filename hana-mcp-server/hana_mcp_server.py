@@ -363,12 +363,13 @@ class OAuth2Middleware:
 
         uaa_url  = self._creds["url"].rstrip("/")
         callback = self._base_url() + "/oauth2/callback"
+        xsappname = self._creds["xsappname"]
         params   = urlencode({
             "response_type": "code",
             "client_id":     self._creds["clientid"],
             "redirect_uri":  callback,
             "state":         our_state,
-            "scope":         "openid",
+            "scope":         f"openid {xsappname}.access",
         })
         await _send_redirect(send, f"{uaa_url}/oauth/authorize?{params}")
 
