@@ -191,9 +191,10 @@ class OAuth2Middleware:
         self._app_url: str | None = None
         self._init_error: str | None = None
         # In-memory stores (safe for single CF instance)
-        self._clients: dict = {}   # client_id → metadata
-        self._pending: dict = {}   # our_state  → Joule request params
-        self._codes:   dict = {}   # our_code   → {email, challenge, ..., expires_at}
+        self._clients:        dict = {}  # client_id    → metadata
+        self._pending:        dict = {}  # our_state    → Joule request params
+        self._codes:          dict = {}  # our_code     → {email, challenge, ..., expires_at}
+        self._refresh_tokens: dict = {}  # refresh_token → {email, expires_at}
         try:
             self._creds = _load_uaa_credentials()
             self._secret = _jwt_secret(self._creds)
@@ -490,11 +491,51 @@ class OAuth2Middleware:
 
     # ── /oauth2/token ─────────────────────────────────────────────────────────
 
+    _REFRESH_TTL = 30 * 24 * 3600  # 30 days in seconds
+
     async def _handle_token(self, scope, receive, send) -> None:
-        """Joule exchanges auth code + PKCE verifier for our JWT."""
+        """Joule exchanges auth code + PKCE verifier for our JWT, or silently refreshes."""
         body   = await _read_body(receive)
         params = parse_qs(body.decode("utf-8", errors="replace"))
 
+        grant_type = params.get("grant_type", ["authorization_code"])[0]
+
+        # ── Refresh token grant ────────────────────────────────────────────────
+        if grant_type == "refresh_token":
+            rt = params.get("refresh_token", [""])[0]
+            rt_entry = self._refresh_tokens.pop(rt, None)
+            if not rt_entry:
+                await _send_json(send, 400, {
+                    "error": "invalid_grant",
+                    "error_description": "Refresh token not found or already used",
+                })
+                return
+            if int(time.time()) > rt_entry["expires_at"]:
+                await _send_json(send, 400, {
+                    "error": "invalid_grant",
+                    "error_description": "Refresh token expired — please log in again",
+                })
+                return
+            # Token rotation: old refresh token consumed, new one issued
+            new_rt = secrets.token_urlsafe(32)
+            self._refresh_tokens[new_rt] = {
+                "email":      rt_entry["email"],
+                "expires_at": rt_entry["expires_at"],  # expiry stays fixed at original login
+            }
+            token = _issue_token(rt_entry["email"], self._secret)
+            remaining = rt_entry["expires_at"] - int(time.time())
+            logger.info("Refreshed access token for %s (%ds left on refresh token)", rt_entry["email"], remaining)
+            await _send_json(send, 200, {
+                "access_token":             token,
+                "token_type":               "Bearer",
+                "expires_in":               3600,
+                "refresh_token":            new_rt,
+                "refresh_token_expires_in": remaining,
+                "scope":                    "openid",
+            })
+            return
+
+        # ── Authorization code grant ───────────────────────────────────────────
         code          = params.get("code",          [""])[0]
         code_verifier = params.get("code_verifier", [""])[0]
 
@@ -514,13 +555,21 @@ class OAuth2Middleware:
                 {"error": "invalid_grant", "error_description": "PKCE code_verifier mismatch"})
             return
 
+        refresh_token = secrets.token_urlsafe(32)
+        self._refresh_tokens[refresh_token] = {
+            "email":      entry["email"],
+            "expires_at": int(time.time()) + self._REFRESH_TTL,
+        }
+
         token = _issue_token(entry["email"], self._secret)
         logger.info("Issued access token for %s", entry["email"])
         await _send_json(send, 200, {
-            "access_token": token,
-            "token_type":   "Bearer",
-            "expires_in":   3600,
-            "scope":        "openid",
+            "access_token":             token,
+            "token_type":               "Bearer",
+            "expires_in":               3600,
+            "refresh_token":            refresh_token,
+            "refresh_token_expires_in": self._REFRESH_TTL,
+            "scope":                    "openid",
         })
 
 

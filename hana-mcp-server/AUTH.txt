@@ -110,7 +110,7 @@ Step 7 — Server issues its own short-lived JWT
   Browser is redirected to Joule's localhost callback:
     GET http://localhost:18766/mcp-callback?code=<our-code>&state=<joule-state>
 
-Step 8 — Joule exchanges the code for an access token
+Step 8 — Joule exchanges the code for an access token + refresh token
   Joule's local server receives the code, then calls:
     POST /oauth2/token
          code=<our-code>
@@ -120,8 +120,9 @@ Step 8 — Joule exchanges the code for an access token
     1. Code exists and hasn't expired (5-minute window)
     2. PKCE: sha256(code_verifier) == code_challenge from step 3
 
-  Server issues its own JWT (HS256, signed with a key derived from XSUAA
-  client secret, valid for 1 hour):
+  Server issues its own short-lived JWT and a 30-day refresh token:
+    Access token (JWT, HS256, signed with a key derived from XSUAA client secret,
+    valid for 1 hour):
     {
       "sub": "ran.yang@sap.com",
       "email": "ran.yang@sap.com",
@@ -129,6 +130,19 @@ Step 8 — Joule exchanges the code for an access token
       "iat": <now>,
       "exp": <now + 3600>
     }
+    Refresh token: opaque random string, valid for 30 days, stored in server memory.
+
+Step 8b — Joule silently refreshes every hour (no user interaction)
+  When the access token expires, Joule automatically calls:
+    POST /oauth2/token
+         grant_type=refresh_token
+         refresh_token=<refresh-token>
+
+  Server validates the refresh token (not expired, not already used).
+  Server issues a new access token (1 hour) + new refresh token (token rotation).
+  The refresh token expiry stays fixed at original login + 30 days — it does NOT
+  reset on each silent refresh.
+  User sees nothing — no browser popup.
 
 Step 9 — Joule uses the JWT to call the MCP tools
   All subsequent MCP requests include:
@@ -157,10 +171,12 @@ To REVOKE access:
   → find user → Role Collections → remove "HanaMcpAccessCollection"
 
 Propagation time:
-  Role assignment changes take 1–2 minutes to propagate in XSUAA.
-  A user who was just added can log in ~2 minutes after assignment.
+  Role assignment changes take 5–10 minutes to propagate in XSUAA.
+  A user who was just added can log in ~5 minutes after assignment.
   A user who was removed will be blocked on their NEXT login attempt.
-  Existing sessions remain valid until the JWT expires (1 hour).
+  Existing sessions remain valid until the refresh token expires (30 days).
+  The access token refreshes silently every hour; the user is only prompted
+  after 30 days.
 
 Role Collection → Role Template → Scope chain:
   HanaMcpAccessCollection
@@ -180,10 +196,14 @@ KEY SECURITY PROPERTIES
    At the token endpoint, the server verifies the original verifier.
    This prevents an attacker who intercepts the auth code from using it.
 
-3. Short-lived tokens limit exposure
+3. Short-lived access tokens, long-lived refresh tokens
    Authorization codes expire after 5 minutes.
    Access JWTs expire after 1 hour.
-   Refresh tokens are not currently implemented (re-login required after 1 hour).
+   Refresh tokens expire after 30 days.
+   Joule silently refreshes the access token every hour using the refresh token —
+   the user sees no popup during this time.
+   After 30 days, Joule triggers a new browser login (one popup, then silent again
+   for another 30 days).
 
 4. Role collection enforced at login, not just at startup
    The XSUAA scope check happens during the OAuth2 callback (step 6), every
