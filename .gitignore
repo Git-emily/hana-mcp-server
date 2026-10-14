@@ -1,0 +1,10 @@
+# Secrets — never commit real credentials
+hana-mcp-server/.env
+hana-mcp-server/vars.yml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/

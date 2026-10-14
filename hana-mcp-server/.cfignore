@@ -4,6 +4,4 @@ __pycache__/
 *.pyc
 *.pyo
 .git/
-xsuaa-migration-plan.txt
-local-test-guide.txt
-btp-deployment-guide.txt
+AUTH.txt

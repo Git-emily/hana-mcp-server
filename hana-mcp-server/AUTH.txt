@@ -1,0 +1,240 @@
+HANA MCP Server — Authentication Logic
+=======================================
+Last updated: 2026-10-14
+
+
+OVERVIEW
+--------
+The server acts as its own OAuth2 Authorization Server, sitting between Joule
+and SAP IDP (XSUAA). Joule never sees the XSUAA Client ID or Secret — those
+stay in VCAP_SERVICES on the server. Joule only needs the MCP URL.
+
+Access control is enforced via BTP Role Collections, managed in the BTP
+subaccount (no code changes or restarts needed to add/remove users).
+
+
+WHO DOES WHAT
+-------------
+  Joule Work Desktop   — the MCP client (runs on user's laptop)
+  Our MCP Server       — acts as OAuth2 Authorization Server + MCP tool host
+  SAP IDP (XSUAA)      — the real identity provider, authenticates users
+  BTP Subaccount       — where admins manage role collection assignments
+
+
+FULL AUTHENTICATION FLOW
+-------------------------
+
+Step 1 — Joule discovers the OAuth2 server
+  Joule sends:  GET /mcp  (no token)
+  Server sends: 401 Unauthorized
+                WWW-Authenticate: Bearer realm="...",
+                                  resource_metadata=".../.well-known/oauth-protected-resource"
+
+  Joule follows resource_metadata URL:
+  Joule sends:  GET /.well-known/oauth-protected-resource
+  Server sends: { "authorization_servers": ["https://hana-mcp-bdc-ran..."] }
+
+  Joule fetches the auth server metadata:
+  Joule sends:  GET /.well-known/oauth-authorization-server
+  Server sends: {
+                  "issuer": "https://hana-mcp-bdc-ran.cfapps.eu12.hana.ondemand.com",
+                  "authorization_endpoint": ".../oauth2/authorize",
+                  "token_endpoint":         ".../oauth2/token",
+                  "registration_endpoint":  ".../oauth2/register",   ← key field
+                  ...
+                }
+
+Step 2 — Joule dynamically registers itself (RFC 7591)
+  Joule sends:  POST /oauth2/register
+                { "redirect_uris": ["http://localhost:18766/mcp-callback"],
+                  "grant_types": ["authorization_code", "refresh_token"] }
+  Server sends: { "client_id": "joule-xxxx",   ← randomly generated
+                  "redirect_uris": ["http://localhost:18766/mcp-callback"],
+                  ... }
+
+  NOTE: No client_secret is issued — Joule is a public client.
+        The client_id is random and disposable; a new one is issued each time.
+        Registered clients are stored in memory only (cleared on restart).
+
+Step 3 — Joule opens a browser for the user to log in
+  Joule opens browser at:
+    GET /oauth2/authorize
+        ?response_type=code
+        &client_id=joule-xxxx
+        &code_challenge=<PKCE-S256-challenge>
+        &code_challenge_method=S256
+        &redirect_uri=http://localhost:18766/mcp-callback
+        &state=<random>
+        &scope=openid
+
+  Server stores the pending request (state → Joule params), then redirects
+  the browser to SAP IDP:
+    GET https://adoption-tools-pjpxyi6v.authentication.eu12.hana.ondemand.com/oauth/authorize
+        ?response_type=code
+        &client_id=sb-hana-mcp-bdc!t1673807      ← our XSUAA client
+        &redirect_uri=https://our-server/oauth2/callback
+        &state=<our-own-state>
+        &scope=openid hana-mcp-bdc!t1673807.access
+
+Step 4 — User authenticates at SAP IDP
+  If the user is already logged in via SAP SSO, this is transparent (no
+  password prompt). Otherwise they enter their SAP credentials.
+
+  SAP IDP redirects the browser back to our server:
+    GET /oauth2/callback?code=<xsuaa-code>&state=<our-state>
+
+Step 5 — Server exchanges the XSUAA code for a XSUAA token (server-side)
+  The browser hits our callback. Our server makes a back-channel request:
+    POST https://.../oauth/token
+         grant_type=authorization_code
+         code=<xsuaa-code>
+         redirect_uri=https://our-server/oauth2/callback
+         Authorization: Basic <clientid>:<clientsecret>    ← never leaves server
+
+  XSUAA returns a JWT access token.
+
+Step 6 — Server checks the role collection (access control)
+  The server decodes the XSUAA JWT and reads the "scope" claim:
+    - If "hana-mcp-bdc!t1673807.access" is present → user has the
+      HanaMcpAccessCollection role collection → ALLOWED
+    - If only "openid" is present → user does NOT have the role collection → DENIED
+      (browser is redirected to Joule's callback with error=access_denied)
+
+  The server also extracts the user's email address from the XSUAA token
+  ("user_name" or "email" claim, e.g. ran.yang@sap.com).
+
+Step 7 — Server issues its own short-lived JWT
+  If access is granted, the server generates an authorization code:
+    our_code = random token (expires in 5 minutes)
+
+  Browser is redirected to Joule's localhost callback:
+    GET http://localhost:18766/mcp-callback?code=<our-code>&state=<joule-state>
+
+Step 8 — Joule exchanges the code for an access token
+  Joule's local server receives the code, then calls:
+    POST /oauth2/token
+         code=<our-code>
+         code_verifier=<PKCE-verifier>    ← proves Joule initiated the flow
+
+  Server validates:
+    1. Code exists and hasn't expired (5-minute window)
+    2. PKCE: sha256(code_verifier) == code_challenge from step 3
+
+  Server issues its own JWT (HS256, signed with a key derived from XSUAA
+  client secret, valid for 1 hour):
+    {
+      "sub": "ran.yang@sap.com",
+      "email": "ran.yang@sap.com",
+      "iss": "hana-mcp-proxy",
+      "iat": <now>,
+      "exp": <now + 3600>
+    }
+
+Step 9 — Joule uses the JWT to call the MCP tools
+  All subsequent MCP requests include:
+    Authorization: Bearer <our-jwt>
+
+  Server validates:
+    1. Signature is valid (HS256 with our key)
+    2. Token is not expired
+    3. iss == "hana-mcp-proxy"
+
+  On success: request passes through to the MCP tool handler.
+  On failure: 401 Unauthorized (Joule must re-authenticate).
+
+
+ACCESS CONTROL MANAGEMENT
+--------------------------
+Access is controlled entirely in the BTP subaccount. No code changes,
+no environment variable updates, no restarts needed.
+
+To GRANT access:
+  BTP Cockpit → Subaccount → Security → Users
+  → find user → Role Collections → assign "HanaMcpAccessCollection"
+
+To REVOKE access:
+  BTP Cockpit → Subaccount → Security → Users
+  → find user → Role Collections → remove "HanaMcpAccessCollection"
+
+Propagation time:
+  Role assignment changes take 1–2 minutes to propagate in XSUAA.
+  A user who was just added can log in ~2 minutes after assignment.
+  A user who was removed will be blocked on their NEXT login attempt.
+  Existing sessions remain valid until the JWT expires (1 hour).
+
+Role Collection → Role Template → Scope chain:
+  HanaMcpAccessCollection
+    └── HanaMcpAccess  (role template)
+          └── hana-mcp-bdc!t1673807.access  (XSUAA scope)
+
+
+KEY SECURITY PROPERTIES
+------------------------
+1. XSUAA credentials never leave the server
+   Client ID and Secret are in VCAP_SERVICES (CF environment).
+   They are used only for server-side token exchange. Joule never sees them.
+
+2. PKCE prevents authorization code interception
+   Joule generates a random code_verifier before the flow starts and sends
+   only the SHA-256 hash (code_challenge) in the authorize request.
+   At the token endpoint, the server verifies the original verifier.
+   This prevents an attacker who intercepts the auth code from using it.
+
+3. Short-lived tokens limit exposure
+   Authorization codes expire after 5 minutes.
+   Access JWTs expire after 1 hour.
+   Refresh tokens are not currently implemented (re-login required after 1 hour).
+
+4. Role collection enforced at login, not just at startup
+   The XSUAA scope check happens during the OAuth2 callback (step 6), every
+   time a new token is issued. Removing a role collection takes effect at
+   the user's next login (within 1–2 minutes of the BTP change).
+
+5. Host header rewrite prevents SSRF via FastMCP
+   The CF reverse proxy sets the Host header to the external hostname.
+   FastMCP's TrustedHostMiddleware only allows "localhost".
+   The middleware rewrites Host to "localhost" before forwarding to FastMCP.
+
+
+ENDPOINTS SUMMARY
+-----------------
+No auth required:
+  GET  /.well-known/oauth-authorization-server   — OAuth2 server metadata
+  GET  /.well-known/oauth-protected-resource     — resource metadata
+  GET  /.well-known/openid-configuration         — alias for auth server metadata
+  POST /oauth2/register                          — dynamic client registration
+  GET  /oauth2/authorize                         — start OAuth2 login flow
+  GET  /oauth2/callback                          — SAP IDP callback (browser)
+  POST /oauth2/token                             — exchange code for JWT
+
+Auth required (Bearer JWT from /oauth2/token):
+  POST /mcp                                      — MCP tool calls (Joule)
+  GET  /mcp                                      — MCP SSE stream (if used)
+
+
+CONFIGURATION
+-------------
+CF environment variables (set via manifest.yml or cf set-env):
+  HANA_HOST          — SAP HANA host
+  HANA_USER          — SAP HANA username
+  HANA_PASSWORD      — SAP HANA password
+  HANA_SCHEMA        — SAP HANA schema name
+  JWT_SIGNING_SECRET — (optional) override the JWT signing secret
+                       Default: SHA-256 hash of the XSUAA client secret
+
+CF service binding (auto-injected into VCAP_SERVICES):
+  hana-mcp-xsuaa     — XSUAA service instance
+                       Provides: url, clientid, clientsecret, xsappname
+
+No ALLOWED_USERS env var is used — access is controlled by BTP role collections.
+
+
+XSUAA SERVICE DETAILS
+---------------------
+Service instance : hana-mcp-xsuaa
+App name         : hana-mcp-bdc (xs-security.json xsappname)
+Full app name    : hana-mcp-bdc!t1673807 (assigned by XSUAA at binding time)
+Auth domain      : adoption-tools-pjpxyi6v.authentication.eu12.hana.ondemand.com
+Scope            : hana-mcp-bdc!t1673807.access
+Role template    : HanaMcpAccess
+Role collection  : HanaMcpAccessCollection
