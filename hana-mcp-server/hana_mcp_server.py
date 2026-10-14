@@ -254,7 +254,10 @@ class OAuth2Middleware:
 
         if not auth.startswith("Bearer "):
             base = self._base_url()
-            www_auth = f'Bearer realm="{base}/mcp", error="invalid_token"'.encode()
+            www_auth = (
+                f'Bearer realm="{base}/mcp",'
+                f' resource_metadata="{base}/.well-known/oauth-protected-resource"'
+            ).encode()
             body = json.dumps({"error": "Missing Authorization: Bearer <token>"}).encode()
             await send({
                 "type": "http.response.start", "status": 401,
