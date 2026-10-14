@@ -94,7 +94,7 @@ def _get_app_url() -> str:
     vcap = json.loads(os.getenv("VCAP_APPLICATION", "{}"))
     uris = vcap.get("application_uris", [])
     if uris:
-        return "https://" + uris[0]
+        return "https://" + uris[0].lower()  # lowercase — CF routes are case-insensitive
     port = os.getenv("PORT", os.getenv("MCP_PORT", "8000"))
     return f"http://localhost:{port}"
 
