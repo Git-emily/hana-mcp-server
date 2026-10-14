@@ -273,16 +273,6 @@ class OAuth2Middleware:
             return
 
         email = (payload.get("email") or payload.get("sub", "")).lower()
-
-        # Allowlist check
-        allowed_raw = os.getenv("ALLOWED_USERS", "")
-        if allowed_raw.strip():
-            allowed = {u.strip().lower() for u in allowed_raw.split(",") if u.strip()}
-            if email not in allowed:
-                logger.warning("JWT valid but %s not in ALLOWED_USERS", email)
-                await _send_json(send, 403, {"error": f"Forbidden: {email} is not authorised."})
-                return
-
         logger.info("AUTH OK principal=%s", email)
 
         # Rewrite Host to localhost — required by FastMCP TrustedHostMiddleware
@@ -421,7 +411,7 @@ class OAuth2Middleware:
             await _send_redirect(send, redir)
             return
 
-        # Extract user email from XSUAA access_token (it's a JWT with user_name/email)
+        # Extract user email + scopes from XSUAA access_token (it's a JWT)
         xsuaa_token = token_data.get("access_token", "")
         try:
             claims = pyjwt.decode(xsuaa_token, options={"verify_signature": False})
@@ -430,8 +420,11 @@ class OAuth2Middleware:
                 claims.get("user_name") or
                 claims.get("sub", "")
             ).lower().strip()
+            raw_scopes = claims.get("scope", [])
+            token_scopes = raw_scopes.split() if isinstance(raw_scopes, str) else raw_scopes
         except Exception:
             email = ""
+            token_scopes = []
 
         if not email:
             redir = pending["joule_redirect"] + "?" + urlencode({
@@ -442,19 +435,21 @@ class OAuth2Middleware:
             await _send_redirect(send, redir)
             return
 
-        # Allowlist check at auth time
-        allowed_raw = os.getenv("ALLOWED_USERS", "")
-        if allowed_raw.strip():
-            allowed = {u.strip().lower() for u in allowed_raw.split(",") if u.strip()}
-            if email not in allowed:
-                logger.warning("OAuth2 callback: %s not in ALLOWED_USERS", email)
-                redir = pending["joule_redirect"] + "?" + urlencode({
-                    "error": "access_denied",
-                    "error_description": f"{email} is not authorised to use this MCP server.",
-                    "state": pending["joule_state"],
-                })
-                await _send_redirect(send, redir)
-                return
+        # Role-collection check via XSUAA scope (managed in BTP subaccount — no redeploy needed)
+        xsappname = self._creds["xsappname"]
+        access_scope = f"{xsappname}.access"
+        if access_scope not in token_scopes:
+            logger.warning("OAuth2 callback: %s missing scope %s (scopes=%s)", email, access_scope, token_scopes)
+            redir = pending["joule_redirect"] + "?" + urlencode({
+                "error": "access_denied",
+                "error_description": (
+                    f"{email} does not have the HanaMcpAccessCollection role. "
+                    "Ask a BTP subaccount admin to assign it."
+                ),
+                "state": pending["joule_state"],
+            })
+            await _send_redirect(send, redir)
+            return
 
         # Issue our own auth code for Joule
         our_code = secrets.token_urlsafe(32)
